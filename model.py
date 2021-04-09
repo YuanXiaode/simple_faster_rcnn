@@ -47,10 +47,10 @@ class VGG(nn.Module):
         # return layers
 
     def _rpn_model(self, mid_channels=512, in_channels=512, n_anchor=9):
-        self.rpn_conv = nn.Conv2d(in_channels, mid_channels, 3, 1, 1)
+        self.rpn_conv = nn.Conv2d(in_channels, mid_channels, 3, 1, 1)  ## k_size , stride, padding
         self.reg_layer = nn.Conv2d(mid_channels, n_anchor * 4, 1, 1, 0)
         # I will be going to use softmax here. you can equally use sigmoid if u replace 2 with 1.
-        self.cls_layer = nn.Conv2d(mid_channels, n_anchor * 2, 1, 1, 0)
+        self.cls_layer = nn.Conv2d(mid_channels, n_anchor * 2, 1, 1, 0)  ## RPN网络输出前景或背景
 
         # conv sliding layer
         self.rpn_conv.weight.data.normal_(0, 0.01)
@@ -84,14 +84,15 @@ class VGG(nn.Module):
                                                    nn.ReLU(),
                                                    nn.Linear(4096, 4096),
                                                    nn.ReLU()])
-        self.cls_loc = nn.Linear(4096, (class_num+1) * 4)  # (VOC 20 classes + 1 background. Each will have 4 co-ordinates)
+        self.cls_loc = nn.Linear(4096, (class_num+1) * 4)  # (VOC 20 classes + 1 background. Each will have 4 co-ordinates) 21个类别，每个类别四个坐标参数，用来回归
         self.cls_loc.weight.data.normal_(0, 0.01)
         self.cls_loc.bias.data.zero_()
 
 
-        self.score = nn.Linear(4096, class_num+1)  # (VOC 20 classes + 1 background)
+        self.score = nn.Linear(4096, class_num+1)  # (VOC 20 classes + 1 background)  用来分类
 
-    def rpn_loss(self, rpn_loc, rpn_score, gt_rpn_loc, gt_rpn_label, weight=10.0):
+    ## 分类损失 + 回归损失
+    def rpn_loss(self, rpn_loc, rpn_score, gt_rpn_loc, gt_rpn_label, weight=10.0):   ## 跟下面的roi_loss是一样的
         # 对与classification我们使用Cross Entropy损失
         gt_rpn_label = torch.autograd.Variable(gt_rpn_label.long())
         rpn_cls_loss = torch.nn.functional.cross_entropy(rpn_score, gt_rpn_label, ignore_index=-1)
@@ -136,14 +137,15 @@ class VGG(nn.Module):
 
     def roi_loss(self, pre_loc, pre_conf, target_loc, target_conf, weight=10.0):
         # 分类损失
-        target_conf = torch.autograd.Variable(target_conf.long())
-        pred_conf_loss = torch.nn.functional.cross_entropy(pre_conf, target_conf, ignore_index=-1)
+        target_conf = torch.autograd.Variable(target_conf.long())  ## 所有跟target_conf有关的计算都能自动求导
+        ## cross_entropy 里面包含 softmax 了，所以之前的分类网络不许呀softmax
+        pred_conf_loss = torch.nn.functional.cross_entropy(pre_conf, target_conf, ignore_index=-1)  ## 注意 ignore_index= - 1 指忽略无效框
         # print(pred_conf_loss)  # Variable containing:  3.0515
 
         #  对于 Regression 我们使用smooth L1 损失
         # 用计算RPN网络回归损失的方法计算回归损失
         # pre_loc_loss = REGLoss(pre_loc, target_loc)
-        pos = target_conf.data > 0  # Regression 损失也被应用在有正标签的边界区域中
+        pos = target_conf.data > 0  # Regression 损失也被应用在有正标签的边界区域中（有效框，且正例）
         mask = pos.unsqueeze(1).expand_as(pre_loc)  # (128, 4L)
 
         # 现在取有正数标签的边界区域

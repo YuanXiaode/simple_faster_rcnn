@@ -54,7 +54,7 @@ anchor_conf.fill(-1)
 anchor_conf[valid_anchor_index] = label
 print anchor_conf.shape  # 所有anchor对应的label（feature_size*feature_size*9）=》 (22500,)
 
-# anchor_locations： 所有anchor框转为目标实体框的系数，无效anchor系数全部为0，有效anchor有有效系数
+# anchor_locations： 所有anchor框转为目标实体框的系数，无效anchor系数全部为0，有效anchor有有效系数  (22500,4)
 anchor_locations = np.empty((len(anchors),) + anchors.shape[1:], dtype=anchor_locs.dtype)
 anchor_locations.fill(0)
 anchor_locations[valid_anchor_index, :] = anchor_locs
@@ -64,20 +64,23 @@ print anchor_locations.shape  # 所有anchor对应的平移缩放系数（featur
 # ----------------------
 
 
-# --------------------step_2: VGG 和 RPN 模型: RPN 预测的是anchor转为目标框的平移缩放系数
+# --------------------step_2: VGG 和 RPN 模型: RPN 预测的是anchor转为目标框的平移缩放系数,label只区分是否有物体（前景或背景）
 vgg = VGG()
 # out_map 特征图， # pred_anchor_locs 预测anchor框到目标框转化的系数， pred_anchor_conf 预测anchor框的分数
 out_map, pred_anchor_locs, pred_anchor_conf = vgg.forward(img_var)
 print out_map.data.shape  # (batch_size, num, feature_size, feature_size) => (1, 512, 50, 50)
 
 # 1. pred_anchor_locs 预测每个anchor框到目标框转化的系数（平移缩放），与 anchor_locations对应
-pred_anchor_locs = pred_anchor_locs.permute(0, 2, 3, 1).contiguous().view(1, -1, 4)
+## 目前 pred_anchor_locs.shape = (1,4x9,50,50)
+pred_anchor_locs = pred_anchor_locs.permute(0, 2, 3, 1).contiguous().view(1, -1, 4)  ## permute之后张量内存不连续，需要用contiguous重新开辟连续内存，才能用view
 print(pred_anchor_locs.shape)  # Out: torch.Size([1, 22500, 4])
 
 # 2. 预测anchor框的置信度，每个anchor框都会对应一个置信度，与 anchor_conf对应
 pred_anchor_conf = pred_anchor_conf.permute(0, 2, 3, 1).contiguous()
 print(pred_anchor_conf.shape)  # Out torch.Size([1, 50, 50, 18])
-objectness_score = pred_anchor_conf.view(1, 50, 50, 9, 2)[:, :, :, :, 1].contiguous().view(1, -1)
+
+## ？？ pred_anchor_conf：（反例，正例），和 anchor_conf对应（anchor_conf对应中有-1表示背景，在计算损失时会排除掉）
+objectness_score = pred_anchor_conf.view(1, 50, 50, 9, 2)[:, :, :, :, 1].contiguous().view(1, -1)  ## 正例的分数
 print(objectness_score.shape)  # Out torch.Size([1, 22500])
 
 pred_anchor_conf = pred_anchor_conf.view(1, -1, 2)
@@ -119,9 +122,10 @@ roi = utils.nms(roi, score, order, nms_thresh=0.7, n_train_post_nms=2000)
 
 # 根据预测框ROI与目标框BBox的IOU，得到每个预测框所要预测的目标框（预测框与哪个目标框的IOU大，就代表预测哪个目标）；
 # 并根据IOU对ROI做进一步过滤，并划分正负样例。
+# 输出的预测框，预测框ID，预测框对应哪个目标(i就是第i个目标),预测框对应的label
 sample_roi, keep_index, gt_assignment, roi_labels = utils.get_propose_target(roi, bbox, labels,
-                                                                                n_sample=128,
-                                                                                pos_ratio=0.25,
+                                                                                n_sample=128,  ## 输出的框数目
+                                                                                pos_ratio=0.25,  ## 有对应目标框:背景框 = pos_ratio : (1 - pos_ratio)
                                                                                 pos_iou_thresh=0.5,
                                                                                 neg_iou_thresh_hi=0.5,
                                                                                 neg_iou_thresh_lo=0.0)
@@ -153,15 +157,15 @@ indices_and_rois = torch.cat([roi_indices[:, None], rois], dim=1)  # torch.Size(
 
 output = []
 rois = indices_and_rois.float()
-rois[:, 1:].mul_(1/16.0)  # 对预测框进行下采样，匹配特征图out_map
+rois[:, 1:].mul_(1/16.0)  # 原来proposal的坐标是标在原图上的，除以16变成Feature尺度
 rois = rois.long()
 num_rois = rois.size(0)
 # out_map: (batch_size, num, feature_size, feature_size) => (1, 512, 50, 50)
-for i in range(num_rois):
+for i in range(num_rois):  ## num_rois = 128
    roi = rois[i]
    im_idx = roi[0]  # 图片的索引号
    # 取出索引号是im_idx的图片特征图=》(1, 512, 50, 50)，因为本实例就一张图片，所以操作完后shape并不变
-   out_map = out_map.narrow(0, im_idx, 1)
+   out_map = out_map.narrow(0, im_idx, 1)  ## 从 out_map 0 维度取 im_idx : (im_idx + 1)的数据
    # 这一步是根据预测框的的x1,y1, x2,y2坐标，从特征图out_map中把目标实体抠出来
    im = out_map[..., roi[2]:(roi[4]+1), roi[1]:(roi[3]+1)]
    # print im.shape
@@ -206,6 +210,8 @@ roi_loc = pred_roi_locs.view(n_sample, -1, 4)  # (128L, 21L, 4L)
 roi_loc = roi_loc[torch.arange(0, n_sample).long(), gt_roi_label]  # 根据预测框的真实类别，找到真实类别所对应的坐标系数
 # print(roi_loc.shape)  # torch.Size([128, 4])
 
+## 这里 gt_roi_loc 是预测框的坐标平移系数，gt_roi_label是预测框的label
+## 所以这一层网络做的，其实是预测 预测框的位置和置信度
 roi_loss = vgg.roi_loss(roi_loc, pred_roi_labels, gt_roi_loc, gt_roi_label, weight=10.0)
 print(roi_loss)  # 3.810348778963089
 

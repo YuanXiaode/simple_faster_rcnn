@@ -5,6 +5,9 @@ import torchvision
 from PIL import Image, ImageDraw
 import numpy as np
 
+## 看 model.py utils.py train.py就够了，这个不知是干啥的
+
+
 img_tensor = torch.zeros((1, 3, 800, 800)).float()
 print(img_tensor.shape)
 #Out: torch.Size([1, 3, 800, 800])
