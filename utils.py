@@ -122,9 +122,9 @@ def get_pos_neg_sample(ious, valid_anchor_len, pos_iou_threshold=0.7,neg_iou_thr
     return label, argmax_ious
 
 
-## 将原anchors回归到新anchors
+## 1：将预测的locs解码成绝对坐标(x,y,h,w),并排除越界和很小的框
+## 2：order只按置信度排序，并取前n_train_pre_nms个数据，用于后面的nms
 def get_predict_bbox(anchors, pred_anchor_locs, objectness_score, n_train_pre_nms=12000, min_size=16):
-    # 转换anchor格式从 y1, x1, y2, x2 到 ctr_x, ctr_y, h, w ：
     anc_height = anchors[:, 2] - anchors[:, 0]
     anc_width = anchors[:, 3] - anchors[:, 1]
     anc_ctr_y = anchors[:, 0] + 0.5 * anc_height  # 中点坐标

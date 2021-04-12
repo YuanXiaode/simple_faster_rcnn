@@ -33,7 +33,8 @@ anchors, valid_anchor_boxes, valid_anchor_index = utils.init_anchor()
 # ious：（8940, 2) 每个有效anchor框与目标实体框的IOU
 ious = utils.compute_iou(valid_anchor_boxes, bbox)
 valid_anchor_len = len(valid_anchor_boxes)
-# 在有效框中找到一定比例的正例和负例
+
+# 制作label，在有效框中找到一定比例的正例和负例，其他为无效数据
 label, argmax_ious = utils.get_pos_neg_sample(ious, valid_anchor_len, pos_iou_threshold=0.7,
                                  neg_iou_threshold=0.3, pos_ratio=0.5, n_sample=256)
 # print np.sum(label == 1)  # 18个正例
@@ -55,7 +56,7 @@ anchor_conf[valid_anchor_index] = label
 print anchor_conf.shape  # 所有anchor对应的label（feature_size*feature_size*9）=》 (22500,)
 
 # anchor_locations： 所有anchor框转为目标实体框的系数，无效anchor系数全部为0，有效anchor有有效系数  (22500,4)
-anchor_locations = np.empty((len(anchors),) + anchors.shape[1:], dtype=anchor_locs.dtype)
+anchor_locations = np.empty((len(anchors),) + anchors.shape[1:], dtype=anchor_locs.dtype) ##?? 为啥这么写啊 直接anchors.shape就行了
 anchor_locations.fill(0)
 anchor_locations[valid_anchor_index, :] = anchor_locs
 print anchor_locations.shape  # 所有anchor对应的平移缩放系数（feature_size*feature_size*9，4）=》(22500, 4)
@@ -133,7 +134,7 @@ sample_roi, keep_index, gt_assignment, roi_labels = utils.get_propose_target(roi
 # 预测框对应的目标框 bbox_for_sampled_roi
 bbox_for_sampled_roi = bbox[gt_assignment[keep_index]]  # 目标框
 print(bbox_for_sampled_roi.shape)  # (128, 4)
-# 预测框（ROI）转目标框的真实系数
+# 预测框（ROI）转目标框的真实系数，作为后续网络的GT
 roi_locs = utils.get_coefficient(sample_roi, bbox_for_sampled_roi)
 # ---------------------
 
@@ -163,7 +164,7 @@ num_rois = rois.size(0)
 # out_map: (batch_size, num, feature_size, feature_size) => (1, 512, 50, 50)
 for i in range(num_rois):  ## num_rois = 128
    roi = rois[i]
-   im_idx = roi[0]  # 图片的索引号
+   im_idx = roi[0]  # 图片的索引号 也就是0
    # 取出索引号是im_idx的图片特征图=》(1, 512, 50, 50)，因为本实例就一张图片，所以操作完后shape并不变
    out_map = out_map.narrow(0, im_idx, 1)  ## 从 out_map 0 维度取 im_idx : (im_idx + 1)的数据
    # 这一步是根据预测框的的x1,y1, x2,y2坐标，从特征图out_map中把目标实体抠出来
@@ -182,7 +183,7 @@ k = output.view(output.size(0), -1)  # [128, 25088]
 
 k = torch.autograd.Variable(k)
 k = vgg.roi_head_classifier(k)  # (128, 4096)
-# torch.Size([128, 84])  84 ==> (20+1)*4,表示每个框有20个候选类别和一个置信度（假设为VOC数据集，共20分类），4表示坐标信息
+# torch.Size([128, 84])  84 ==> (20+1)*4,表示每个框有20个候选类别和背景（假设为VOC数据集，共20分类），4表示坐标信息
 pred_roi_locs = vgg.cls_loc(k)
 # pred_roi_labels： [128, 21] 表示每个框的类别和置信度
 pred_roi_labels = vgg.score(k)
@@ -191,7 +192,7 @@ print(pred_roi_locs.data.shape, pred_roi_labels.data.shape)  # torch.Size([128, 
 
 
 # ---------------------step_7: 分类损失  (有效预测框真实系数与有效预测框的预测系数间损失，其中系数是转为目标框的坐标系数)
-# 从上面step_4中，我们得到了预测框转为目标框的目标信息：
+# 从上面step_4中，我们得到了RPN预测框转为目标框的目标信息：
 # 预测框的坐标系数(roi_locs)：  (128, 4)
 # 预测框的所属类别(roi_labels)：(128, )
 
@@ -199,6 +200,7 @@ print(pred_roi_locs.data.shape, pred_roi_labels.data.shape)  # torch.Size([128, 
 # 预测框的坐标系数：pred_roi_locs  (128, 84)
 # 预测框的所属类别和置信度: pred_roi_labels  (128, 21)
 
+# 所以这一步预测的是 RPN中计算出的ROI对应的偏移量和label
 
 gt_roi_loc = torch.from_numpy(roi_locs)
 gt_roi_label = torch.from_numpy(np.float32(roi_labels)).long()
@@ -210,11 +212,8 @@ roi_loc = pred_roi_locs.view(n_sample, -1, 4)  # (128L, 21L, 4L)
 roi_loc = roi_loc[torch.arange(0, n_sample).long(), gt_roi_label]  # 根据预测框的真实类别，找到真实类别所对应的坐标系数
 # print(roi_loc.shape)  # torch.Size([128, 4])
 
-## 这里 gt_roi_loc 是预测框的坐标平移系数，gt_roi_label是预测框的label
-## 所以这一层网络做的，其实是预测 预测框的位置和置信度
 roi_loss = vgg.roi_loss(roi_loc, pred_roi_labels, gt_roi_loc, gt_roi_label, weight=10.0)
 print(roi_loss)  # 3.810348778963089
-
 
 # 整体损失函数
 total_loss = rpn_loss + roi_loss
